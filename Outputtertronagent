@@ -1,0 +1,433 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.spatial import ConvexHull
+import random
+from itertools import combinations
+
+# Set random seed for reproducibility
+np.random.seed(42)
+
+class Agent:
+    def __init__(self, gender, marks, z_locations):
+        self.gender = gender  # 'male' or 'female'
+        self.marks = marks  # List of 5 complex numbers [x, y]
+        self.z_locations = z_locations  # List of 5 z-axis locations (0-31)
+
+def generate_parent_agent(gender):
+    # Generate 5 random complex number marks [x, y] in 32x32 grid
+    marks = [[random.randint(0, 31), random.randint(0, 31)] for _ in range(5)]
+    # Generate 5 random z-axis locations
+    z_locations = random.sample(range(32), 5)
+    return Agent(gender, marks, z_locations)
+
+def determine_q_provider_and_gender(male, female):
+    # Find z-location closest to 31
+    male_max_z = max(male.z_locations)
+    female_max_z = max(female.z_locations)
+    if male_max_z > female_max_z:
+        # Male has z closest to 31 -> Q provider, new agent is WQ (female)
+        return male, 'male', True
+    elif female_max_z > male_max_z:
+        # Female has z closest to 31 -> Q provider, new agent is MQ (male)
+        return female, 'female', False
+    else:
+        # Tie: Random choice, Q takes precedence
+        q_provider_gender = random.choice(['male', 'female'])
+        is_wq = (q_provider_gender == 'male')  # Opposite gender
+        q_provider = male if q_provider_gender == 'male' else female
+        return q_provider, q_provider_gender, is_wq
+
+def assign_z_locations(num_objects=10, mutation_prob=0.01):
+    # Assign z-locations in strictly increasing order: z_0 < z_1 < ... < z_9
+    # Choose 10 unique locations from 0 to 31
+    selected_z = random.sample(range(32), num_objects)  # Choose 10 locations
+    selected_z.sort()  # Ensure increasing order
+    
+    # Apply 1% mutation chance to all z-locations
+    for i in range(num_objects):
+        if random.random() < mutation_prob:
+            # Possible new z must maintain z_i-1 < z_i < z_i+1
+            min_z = selected_z[i-1] + 1 if i > 0 else 0
+            max_z = selected_z[i+1] - 1 if i < num_objects-1 else 31
+            if min_z <= max_z:
+                new_z = random.randint(min_z, max_z)
+                selected_z[i] = new_z
+    # Re-sort to ensure order after mutations
+    selected_z.sort()
+    return selected_z
+
+def generate_race_label(q_marks, w_or_m_marks, is_wq):
+    # Combine Q and W/M marks, sort by z-location
+    labels = []
+    q_z = q_marks['z_locations']
+    wm_z = w_or_m_marks['z_locations']
+    for i in range(10):
+        if i < 5:
+            labels.append(('Q', q_z[i]))
+        else:
+            label = 'W' if is_wq else 'M'
+            labels.append((label, wm_z[i-5]))
+    # Sort by z-location; ties prioritize Q
+    labels.sort(key=lambda x: (x[1], x[0] != 'Q'))
+    race_label = ''.join(label[0] for label in labels)
+    # Ensure object 9 is Q
+    if race_label[9] != 'Q':
+        # Swap with the last Q in the label
+        race_list = list(race_label)
+        q_indices = [i for i, c in enumerate(race_list) if c == 'Q' and i != 9]
+        if q_indices:
+            swap_idx = q_indices[-1]
+            race_list[9], race_list[swap_idx] = 'Q', race_list[swap_idx]
+            race_label = ''.join(race_list)
+    return race_label
+
+def assign_mark_values(grid, mark, mark_type):
+    x, y = mark
+    if mark_type in ['M', 'W']:
+        grid[y, x] = -9
+        # Progress +1 horizontally
+        for i in range(1, 32-x):
+            grid[y, x+i] = -9 + i
+        for i in range(1, x+1):
+            grid[y, x-i] = -9 + i
+    else:  # Q
+        grid[y, x] = 9
+        # Progress -1 vertically
+        for i in range(1, 32-y):
+            grid[y+i, x] = 9 - i
+        for i in range(1, y+1):
+            grid[y-i, x] = 9 - i
+
+def calculate_edge_values(grid, mark, mark_type):
+    x, y = mark
+    if mark_type in ['M', 'W']:
+        # Horizontal edges
+        left = grid[y, 0] * 1j if grid[y, 0] != 0 else 0
+        right = grid[y, 31] * 1j if grid[y, 31] != 0 else 0
+        return (left + right) / 2
+    else:  # Q
+        # Vertical edges
+        top = grid[0, x] * 1j if grid[0, x] != 0 else 0
+        bottom = grid[31, x] * 1j if grid[31, x] != 0 else 0
+        return (top + bottom) / 2
+
+def find_crossings(grid):
+    crossings = []
+    for y in range(32):
+        for x in range(32):
+            if grid[y, x] != 0:
+                # Check if row and column have other marks
+                row_marks = np.sum(grid[y, :] != 0)
+                col_marks = np.sum(grid[:, x] != 0)
+                if row_marks > 1 or col_marks > 1:
+                    crossings.append([x, y])
+                    if row_marks > 1 and col_marks > 1:
+                        grid[y, x] = '@'
+    return crossings
+
+def calculate_distances(points):
+    if len(points) < 2:
+        return 0
+    total = 0
+    for (x1, y1), (x2, y2) in combinations(points, 2):
+        total += np.sqrt((x2-x1)**2 + (y2-y1)**2)
+    return total
+
+def calculate_area(points):
+    if len(points) < 3:
+        return 0
+    points = np.array(points)
+    try:
+        hull = ConvexHull(points)
+        return hull.volume  # Area for 2D points
+    except:
+        return 0
+
+def calculate_perimeter(points):
+    if len(points) < 2:
+        return 0
+    points = np.array(points)
+    try:
+        hull = ConvexHull(points)
+        hull_points = points[hull.vertices]
+        perimeter = 0
+        for i in range(len(hull_points)):
+            x1, y1 = hull_points[i]
+            x2, y2 = hull_points[(i+1) % len(hull_points)]
+            perimeter += np.sqrt((x2-x1)**2 + (y2-y1)**2)
+        return perimeter
+    except:
+        return 0
+
+def couple_agents(male, female):
+    # Determine Q provider and new agent gender
+    q_provider, q_gender, is_wq = determine_q_provider_and_gender(male, female)
+    other_agent = female if q_gender == 'male' else male
+    other_mark = 'W' if is_wq else 'M'
+
+    # Assign z-locations for Q and W/M marks
+    q_marks = {
+        'marks': q_provider.marks.copy(),
+        'z_locations': random.sample(range(32), 5)
+    }
+    w_or_m_marks = {
+        'marks': other_agent.marks.copy(),
+        'z_locations': random.sample(range(32), 5)
+    }
+
+    # Generate race label
+    race_label = generate_race_label(q_marks, w_or_m_marks, is_wq)
+
+    # Assign z-locations for general objects (strictly increasing)
+    sorted_z = assign_z_locations()
+
+    # Initialize general objects
+    general_objects = []
+    for i in range(10):
+        obj_type = race_label[i]  # W, M, or Q
+        obj = {
+            'object_type': i,
+            'z_location': sorted_z[i],
+            'race_label': obj_type,  # Single character: W, M, or Q
+            'marks': [],
+            'mark_types': []
+        }
+        # Assign exactly 10 marks: 5 from male, 5 from female
+        if is_wq:
+            # WQ agent (female):
+            # - Male parent: Always Q (to female)
+            # - Female parent: W (same gender) if Q provider is female, Q (to male) if Q provider is male
+            obj['marks'].extend(male.marks)
+            obj['mark_types'].extend(['Q'] * 5)  # Male to female -> Q
+            if q_gender == 'female':
+                obj['marks'].extend(female.marks)
+                obj['mark_types'].extend(['W'] * 5)  # Female to female -> W
+            else:
+                obj['marks'].extend(female.marks)
+                obj['mark_types'].extend(['Q'] * 5)  # Female to male -> Q
+        else:
+            # MQ agent (male):
+            # - Female parent: Always Q (to male)
+            # - Male parent: M (same gender) if Q provider is male, Q (to female) if Q provider is female
+            obj['marks'].extend(female.marks)
+            obj['mark_types'].extend(['Q'] * 5)  # Female to male -> Q
+            if q_gender == 'male':
+                obj['marks'].extend(male.marks)
+                obj['mark_types'].extend(['M'] * 5)  # Male to male -> M
+            else:
+                obj['marks'].extend(male.marks)
+                obj['mark_types'].extend(['Q'] * 5)  # Male to female -> Q
+        general_objects.append(obj)
+
+    # Process each general object
+    outputs = []
+    for obj in general_objects:
+        grid = np.zeros((32, 32), dtype=object)
+        for i, (mark, mark_type) in enumerate(zip(obj['marks'], obj['mark_types'])):
+            assign_mark_values(grid, mark, mark_type)
+        
+        # Calculate edge values
+        edge_values = [calculate_edge_values(grid, mark, mark_type) for mark, mark_type in zip(obj['marks'], obj['mark_types'])]
+        edge_avg = np.mean([v for v in edge_values if isinstance(v, (int, float, complex))])
+
+        # Find crossings
+        crossings = find_crossings(grid)
+        crossing_sum = sum(grid[y, x] for x, y in crossings if isinstance(grid[y, x], (int, float)))
+        crossing_avg = crossing_sum / len(crossings) if crossings else 0
+
+        # Calculate distances
+        q_points = [mark for mark, mt in zip(obj['marks'], obj['mark_types']) if mt == 'Q']
+        wm_points = [mark for mark, mt in zip(obj['marks'], obj['mark_types']) if mt in ['W', 'M']]
+        all_dist = calculate_distances(obj['marks'])
+        q_dist = calculate_distances(q_points)
+        wm_dist = calculate_distances(wm_points)
+        q_to_wm_dist = sum(np.sqrt((qx-x)**2 + (qy-y)**2) for qx, qy in q_points for x, y in wm_points) if q_points and wm_points else 0
+        crossing_dist = calculate_distances(crossings)
+        crossing_to_q = sum(np.sqrt((qx-x)**2 + (qy-y)**2) for qx, qy in q_points for x, y in crossings) if q_points and crossings else 0
+        crossing_to_wm = sum(np.sqrt((wx-x)**2 + (wy-y)**2) for wx, wy in wm_points for x, y in crossings) if wm_points and crossings else 0
+
+        # Calculate areas and perimeters
+        total_area = 32 * 32
+        q_area = calculate_area(q_points)
+        wm_area = calculate_area(wm_points)
+        crossing_area = calculate_area(crossings)
+        q_perimeter = calculate_perimeter(q_points)
+        wm_perimeter = calculate_perimeter(wm_points)
+        crossing_perimeter = calculate_perimeter(crossings)
+
+        # Shared areas (approximated as minimum of overlapping convex hulls)
+        shared_q_wm = min(q_area, wm_area)
+        shared_q_crossing = min(q_area, crossing_area)
+        shared_wm_crossing = min(wm_area, crossing_area)
+        shared_all = min(q_area, wm_area, crossing_area)
+        remaining_area = total_area - (q_area + wm_area + crossing_area - shared_q_wm - shared_q_crossing - shared_wm_crossing + shared_all)
+
+        # Volume (area * 1 unit z-extent)
+        volume = (q_area + wm_area + crossing_area) / 3  # Average area as volume
+
+        obj_output = {
+            'object_type': obj['object_type'],
+            'z_location': obj['z_location'],
+            'race_label': obj['race_label'],
+            'edge_avg': edge_avg,
+            'crossing_avg': crossing_avg,
+            'all_dist': all_dist,
+            'q_dist': q_dist,
+            'wm_dist': wm_dist,
+            'q_to_wm_dist': q_to_wm_dist,
+            'crossing_dist': crossing_dist,
+            'crossing_to_q': crossing_to_q,
+            'crossing_to_wm': crossing_to_wm,
+            'q_area': q_area,
+            'wm_area': wm_area,
+            'crossing_area': crossing_area,
+            'q_perimeter': q_perimeter,
+            'wm_perimeter': wm_perimeter,
+            'crossing_perimeter': crossing_perimeter,
+            'shared_q_wm': shared_q_wm,
+            'shared_q_crossing': shared_q_crossing,
+            'shared_wm_crossing': shared_wm_crossing,
+            'shared_all': shared_all,
+            'remaining_area': remaining_area,
+            'volume': volume,
+            'marks': obj['marks'],
+            'mark_types': obj['mark_types'],
+            'crossings': crossings
+        }
+        outputs.append(obj_output)
+
+    # Complex objects and traversing volumes
+    complex_outputs = []
+    for i in range(9):
+        for j in range(i+1, 10):
+            obj1, obj2 = outputs[i], outputs[j]
+            # Determine connection type based on race label
+            race = race_label
+            if race[i] in ['W', 'M'] and race[j] in ['W', 'M']:
+                # Shortest lines to like marks
+                dist = min(np.sqrt((x1-x2)**2 + (y1-y2)**2) for x1, y1 in obj1['marks'] for x2, y2 in obj2['marks'])
+            elif race[i] == 'Q' and race[j] in ['W', 'M']:
+                # Longest lines
+                dist = max(np.sqrt((x1-x2)**2 + (y1-y2)**2) for x1, y1 in obj1['marks'] for x2, y2 in obj2['marks'])
+            else:
+                # Q to Q: most complex (average of all connections)
+                dist = np.mean([np.sqrt((x1-x2)**2 + (y1-y2)**2) for x1, y1 in obj1['marks'] for x2, y2 in obj2['marks']])
+            # Traversing volume (approximated)
+            trav_volume = (obj1['volume'] + obj2['volume']) * dist / 2
+            complex_outputs.append({
+                'complex_object': f'{i}-{j}',
+                'distance': dist,
+                'traversing_volume': trav_volume
+            })
+
+    return outputs, complex_outputs, race_label, is_wq
+
+def visualize_plane(obj, filename):
+    plt.figure(figsize=(8, 8))
+    plt.title(f"Object {obj['object_type']} at z={obj['z_location']} (Label: {obj['race_label']})")
+    plt.grid(True)
+    plt.xlim(0, 31)
+    plt.ylim(0, 31)
+
+    # Plot marks
+    for mark, mt in zip(obj['marks'], obj['mark_types']):
+        x, y = mark
+        color = 'r' if mt == 'Q' else 'b' if mt == 'W' else 'g'
+        plt.scatter(x, y, c=color, s=100)
+    
+    # Plot crossings
+    if obj['crossings']:
+        cx, cy = zip(*obj['crossings'])
+        plt.scatter(cx, cy, c='k', marker='x', label='Crossings', s=100)
+
+    # Create custom legend
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], marker='o', color='w', label='Q', markerfacecolor='r', markersize=10),
+        Line2D([0], [0], marker='o', color='w', label='W', markerfacecolor='b', markersize=10) if any(mt == 'W' for mt in obj['mark_types']) else None,
+        Line2D([0], [0], marker='o', color='w', label='M', markerfacecolor='g', markersize=10) if any(mt == 'M' for mt in obj['mark_types']) else None,
+        Line2D([0], [0], marker='x', color='w', label='Crossings', markerfacecolor='k', markersize=10)
+    ]
+    legend_elements = [e for e in legend_elements if e is not None]
+    plt.legend(handles=legend_elements)
+    plt.savefig(filename)
+    plt.close()
+
+def main():
+    # Generate agents until we have 4 WQ and 4 MQ
+    wq_agents = []
+    mq_agents = []
+    max_attempts = 100  # Prevent infinite loop
+    attempt = 0
+    
+    while (len(wq_agents) < 4 or len(mq_agents) < 4) and attempt < max_attempts:
+        male = generate_parent_agent('male')
+        female = generate_parent_agent('female')
+        outputs, complex_outputs, race_label, is_wq = couple_agents(male, female)
+        if is_wq and len(wq_agents) < 4:
+            wq_agents.append((outputs, complex_outputs, race_label, is_wq))
+        elif not is_wq and len(mq_agents) < 4:
+            mq_agents.append((outputs, complex_outputs, race_label, is_wq))
+        attempt += 1
+
+    # Visualize and save outputs for all agents
+    for idx, (outputs, complex_outputs, race_label, is_wq) in enumerate(wq_agents):
+        agent_type = "WQ"
+        print(f"\n{agent_type} Agent {idx+1} Race Label: {race_label}")
+        for i, obj in enumerate(outputs):
+            visualize_plane(obj, f'{agent_type.lower()}_agent_{idx+1}_object_{i}.png')
+            print(f"{agent_type} Agent {idx+1} Object {i}:")
+            print(f"  object_type: {obj['object_type']}")
+            print(f"  z_location: {obj['z_location']}")
+            print(f"  race_label: {obj['race_label']}")
+            print(f"  mark_types: {obj['mark_types']}")
+            print(f"  edge_avg: {obj['edge_avg']}")
+            print(f"  crossing_avg: {obj['crossing_avg']}")
+            print(f"  all_dist: {obj['all_dist']}")
+            print(f"  q_dist: {obj['q_dist']}")
+            print(f"  wm_dist: {obj['wm_dist']}")
+            print(f"  q_to_wm_dist: {obj['q_to_wm_dist']}")
+            print(f"  crossing_dist: {obj['crossing_dist']}")
+            print(f"  crossing_to_q: {obj['crossing_to_q']}")
+            print(f"  crossing_to_wm: {obj['crossing_to_wm']}")
+            print(f"  q_area: {obj['q_area']}")
+            print(f"  wm_area: {obj['wm_area']}")
+            print(f"  crossing_area: {obj['crossing_area']}")
+            print(f"  remaining_area: {obj['remaining_area']}")
+            print(f"  volume: {obj['volume']}")
+        
+        print(f"{agent_type} Agent {idx+1} Complex Objects:")
+        for comp in complex_outputs:
+            print(comp)
+
+    for idx, (outputs, complex_outputs, race_label, is_wq) in enumerate(mq_agents):
+        agent_type = "MQ"
+        print(f"\n{agent_type} Agent {idx+1} Race Label: {race_label}")
+        for i, obj in enumerate(outputs):
+            visualize_plane(obj, f'{agent_type.lower()}_agent_{idx+1}_object_{i}.png')
+            print(f"{agent_type} Agent {idx+1} Object {i}:")
+            print(f"  object_type: {obj['object_type']}")
+            print(f"  z_location: {obj['z_location']}")
+            print(f"  race_label: {obj['race_label']}")
+            print(f"  mark_types: {obj['mark_types']}")
+            print(f"  edge_avg: {obj['edge_avg']}")
+            print(f"  crossing_avg: {obj['crossing_avg']}")
+            print(f"  all_dist: {obj['all_dist']}")
+            print(f"  q_dist: {obj['q_dist']}")
+            print(f"  wm_dist: {obj['wm_dist']}")
+            print(f"  q_to_wm_dist: {obj['q_to_wm_dist']}")
+            print(f"  crossing_dist: {obj['crossing_dist']}")
+            print(f"  crossing_to_q: {obj['crossing_to_q']}")
+            print(f"  crossing_to_wm: {obj['crossing_to_wm']}")
+            print(f"  q_area: {obj['q_area']}")
+            print(f"  wm_area: {obj['wm_area']}")
+            print(f"  crossing_area: {obj['crossing_area']}")
+            print(f"  remaining_area: {obj['remaining_area']}")
+            print(f"  volume: {obj['volume']}")
+        
+        print(f"{agent_type} Agent {idx+1} Complex Objects:")
+        for comp in complex_outputs:
+            print(comp)
+
+if __name__ == "__main__":
+    main()
